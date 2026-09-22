@@ -22,7 +22,7 @@ PORT = int(os.getenv("PORT", 5000))
 # ⚠️ 서버 ID 및 주요 역할/채널 ID 설정
 TARGET_GUILD_ID = "1551921173783257108"
 TARGET_ROLE_ID = "1551935006975205377"         # 인증 시 부여할 '인증됨' 역할 ID
-UNVERIFIED_ROLE_ID = "1551953671779131392" # 👈 새로 가입 시 자동 지급 & 인증 시 제거될 '미인증' 역할 ID
+UNVERIFIED_ROLE_ID = "1551953671779131392" # 👈 '미인증' 역할 ID
 PURCHASE_LOG_CHANNEL_ID = 1551946063764529262  # 구매로그가 뜰 채널 ID (숫자)
 WELCOME_CHANNEL_ID = 1551939925065334834      # 입장 알람을 띄울 채널 ID (숫자)
 GOODBYE_CHANNEL_ID = 1551941661330767952      # 퇴장 알람을 띄울 채널 ID (숫자)
@@ -99,6 +99,7 @@ def callback():
     token_res = requests.post("https://discord.com/api/v10/oauth2/token", data=data, headers=headers)
     
     if token_res.status_code != 200:
+        print(f"[에러] 토큰 발급 실패: {token_res.text}")
         return "토큰 발급 실패", 500
     
     access_token = token_res.json().get("access_token")
@@ -112,24 +113,23 @@ def callback():
     save_token(user_id, access_token)
 
     if TARGET_GUILD_ID and TARGET_GUILD_ID != "너의_디스코드_서버_ID":
-        add_headers = {"Authorization": f"Bot {BOT_TOKEN}", "Content-Type": "application/json"}
-        url = f"https://discord.com/api/v10/guilds/{TARGET_GUILD_ID}/members/{user_id}"
+        bot_headers = {"Authorization": f"Bot {BOT_TOKEN}", "Content-Type": "application/json"}
         
-        # 1. 인증된 역할 부여
-        roles_to_add = []
+        # 1. 서버에 유저 가입 처리
+        url = f"https://discord.com/api/v10/guilds/{TARGET_GUILD_ID}/members/{user_id}"
+        requests.put(url, json={"access_token": access_token}, headers=bot_headers)
+        
+        # 2. '인증됨' 역할 개별 부여 (디버그 코드 포함)
         if TARGET_ROLE_ID and TARGET_ROLE_ID != "인증시_부여할_역할_ID":
-            roles_to_add.append(TARGET_ROLE_ID)
-            
-        payload = {"access_token": access_token}
-        if roles_to_add:
-            payload["roles"] = roles_to_add
-            
-        requests.put(url, json=payload, headers=add_headers)
+            role_url = f"https://discord.com/api/v10/guilds/{TARGET_GUILD_ID}/members/{user_id}/roles/{TARGET_ROLE_ID}"
+            role_res = requests.put(role_url, headers={"Authorization": f"Bot {BOT_TOKEN}"})
+            print(f"[디버그] 인증됨 역할 부여 결과 코드: {role_res.status_code}, 내용: {role_res.text}")
 
-        # 2. 인증 완료 시 미인증 역할 자동 제거
+        # 3. '미인증' 역할 자동 제거 (디버그 코드 포함)
         if UNVERIFIED_ROLE_ID and UNVERIFIED_ROLE_ID != "여기에_미인증_역할_ID_입력":
             remove_url = f"https://discord.com/api/v10/guilds/{TARGET_GUILD_ID}/members/{user_id}/roles/{UNVERIFIED_ROLE_ID}"
-            requests.delete(remove_url, headers={"Authorization": f"Bot {BOT_TOKEN}"})
+            remove_res = requests.delete(remove_url, headers={"Authorization": f"Bot {BOT_TOKEN}"})
+            print(f"[디버그] 미인증 역할 제거 결과 코드: {remove_res.status_code}")
 
     return f"<h1>인증 및 서버 가입 완료!</h1><p>{username}님, 정상적으로 처리되었습니다. 창을 닫으셔도 됩니다.</p>"
 
@@ -142,7 +142,6 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 # --- [입장 시 미인증 역할 자동 부여 및 환영/퇴장 알람 이벤트] ---
 @bot.event
 async def on_member_join(member):
-    # 1. 입장하자마자 '미인증' 역할 자동 부여
     if UNVERIFIED_ROLE_ID and UNVERIFIED_ROLE_ID != "여기에_미인증_역할_ID_입력":
         try:
             role = member.guild.get_role(int(UNVERIFIED_ROLE_ID))
@@ -151,7 +150,6 @@ async def on_member_join(member):
         except Exception as e:
             print(f"미인증 역할 부여 오류: {e}")
 
-    # 2. 입장 환영 메시지
     channel = member.guild.get_channel(WELCOME_CHANNEL_ID)
     if channel:
         await channel.send(f"🎉 {member.mention}님, 서버에 오신 것을 환영합니다! 🥳")
