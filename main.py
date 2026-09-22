@@ -6,7 +6,7 @@ import requests
 from flask import Flask, request, redirect, render_template_string
 import discord
 from discord.ext import commands
-from discord.ui import View, Button
+from discord.ui import View, Button, Select
 from dotenv import load_dotenv
 from pymongo import MongoClient
 
@@ -36,7 +36,7 @@ mongo_client = MongoClient(MONGO_URI)
 db = mongo_client["discord_bot_db"]
 tokens_collection = db["tokens"]
 users_collection = db["users"]       # 유저 포인트 정보 저장
-items_collection = db["items"]       # 자판기 상품 정보 (이름, 가격, 내용/계정정보) 저장
+items_collection = db["items"]       # 자판기 상품 정보 저장
 orders_collection = db["orders"]     # 주문 내역 저장
 
 def load_tokens():
@@ -139,22 +139,69 @@ async def on_member_remove(member):
     if channel:
         await channel.send(f"👋 **{member.name}**님이 서버를 나가셨습니다...")
 
-# --- [자판기 패널 인터페이스 클래스 (장바구니 제거됨)] ---
-class VendingView(View):
+# --- [즉시 구매 셀렉트박스] ---
+class BuySelect(Select):
+    def __init__(self, items):
+        options = []
+        for item in items:
+            options.append(discord.SelectOption(
+                label=item["name"], 
+                description=f"가격: {item['price']}원", 
+                emoji="🛒"
+            ))
+        super().__init__(placeholder="🛍️ 구매할 상품을 선택하세요!", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        item_name = self.values[0]
+        item = items_collection.find_one({"name": item_name})
+        if not item:
+            await interaction.response.send_message("❌ 존재하지 않는 상품입니다.", ephemeral=True)
+            return
+
+        user_doc = users_collection.find_one({"user_id": str(interaction.user.id)})
+        my_points = user_doc.get("points", 0) if user_doc else 0
+        price = item["price"]
+
+        if my_points < price:
+            await interaction.response.send_message(f"❌ 포인트가 부족합니다! (필요: {price}원, 보유: {my_points}원)", ephemeral=True)
+            return
+
+        users_collection.update_one({"user_id": str(interaction.user.id)}, {"$inc": {"points": -price}})
+        
+        orders_collection.insert_one({
+            "user_id": str(interaction.user.id),
+            "item_name": item_name,
+            "date": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        })
+
+        try:
+            await interaction.user.send(f"📦 **[{item_name}]** 구매가 완료되었습니다!\n\n[상품 정보 / 계정 내용]\n{item['content']}")
+            await interaction.response.send_message(f"🎉 구매 완료! **DM(개인 메시지)**으로 상품 정보가 발송되었습니다.", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.response.send_message(f"⚠️ 구매는 되었으나 **DM 차단** 상태여서 상품 정보를 보내지 못했습니다!", ephemeral=True)
+
+        log_channel = interaction.guild.get_channel(PURCHASE_LOG_CHANNEL_ID)
+        if log_channel:
+            await log_channel.send(f"💐 {interaction.user.name}님이 {item_name}을(를) 구매했습니다!")
+
+class BuySelectView(View):
+    def __init__(self, items):
+        super().__init__(timeout=None)
+        self.add_item(BuySelect(items))
+
+# --- [자판기 메인 뷰] ---
+class VendingMainView(View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="상품 보기", style=discord.ButtonStyle.success, custom_id="shop_view_items", emoji="🛒")
-    async def view_items(self, interaction: discord.Interaction, button: Button):
+    @discord.ui.button(label="상품 구매하기", style=discord.ButtonStyle.success, custom_id="vending_buy_menu", emoji="🛍️")
+    async def open_buy_menu(self, interaction: discord.Interaction, button: Button):
         items = list(items_collection.find())
         if not items:
             await interaction.response.send_message("❌ 현재 등록된 상품이 없습니다.", ephemeral=True)
             return
-        
-        embed = discord.Embed(title="🌳 마크닉 상품 목록", description="구매하려면 `!구매 [상품이름]` 명령어를 입력하세요!", color=0x5865F2)
-        for idx, item in enumerate(items, 1):
-            embed.add_field(name=f"{idx}. {item['name']}", value=f"가격: {item['price']}원", inline=False)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        view = BuySelectView(items)
+        await interaction.response.send_message("👇 아래 목록에서 구매할 상품을 선택하세요!", view=view, ephemeral=True)
 
     @discord.ui.button(label="내 포인트", style=discord.ButtonStyle.primary, custom_id="shop_my_points", emoji="💰")
     async def my_points(self, interaction: discord.Interaction, button: Button):
@@ -174,14 +221,11 @@ class VendingView(View):
             embed.add_field(name=order['item_name'], value=f"구매 일시: {order['date']}", inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @discord.ui.button(label="문의하기", style=discord.ButtonStyle.danger, custom_id="shop_ticket", emoji="💬")
-    async def inquiry(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.send_message("🎫 문의는 서버 내 티켓 생성 채널의 [티켓 열기] 버튼을 이용해 주세요!", ephemeral=True)
 
-# --- [티켓 생성 및 닫기 뷰 (안정성 강화)] ---
+# --- [티켓 관련 뷰 (고정형 뷰로 수정 완료)] ---
 class TicketCloseView(View):
     def __init__(self):
-        super().__init__(timeout=None)
+        super().__init__(timeout=None)  # 영구 유지 설정
 
     @discord.ui.button(label="티켓 닫기", style=discord.ButtonStyle.danger, custom_id="close_ticket_btn", emoji="🔒")
     async def close_ticket(self, interaction: discord.Interaction, button: Button):
@@ -192,16 +236,26 @@ class TicketCloseView(View):
         except:
             pass
 
-class TicketView(View):
+class TicketMainView(View):
     def __init__(self):
-        super().__init__(timeout=None)
+        super().__init__(timeout=None)  # 영구 유지 설정
 
-    @discord.ui.button(label="티켓 열기", style=discord.ButtonStyle.success, custom_id="create_ticket_btn", emoji="📩")
+    @discord.ui.button(label="티켓 열기 (문의하기)", style=discord.ButtonStyle.success, custom_id="create_ticket_btn", emoji="📩")
     async def create_ticket(self, interaction: discord.Interaction, button: Button):
         guild = interaction.guild
+        
+        # 봇에게 채널 관리 권한이 있는지 확인
+        if not guild.me.guild_permissions.manage_channels:
+            await interaction.response.send_message("❌ 봇에게 **[채널 관리]** 권한이 없습니다! 서버 설정에서 봇 권한을 확인해주세요.", ephemeral=True)
+            return
+
         category = discord.utils.get(guild.categories, name="🎫 문의 티켓")
         if not category:
-            category = await guild.create_category("🎫 문의 티켓")
+            try:
+                category = await guild.create_category("🎫 문의 티켓")
+            except:
+                await interaction.response.send_message("❌ 카테고리를 생성할 권한이 없습니다.", ephemeral=True)
+                return
         
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(read_messages=False),
@@ -209,51 +263,48 @@ class TicketView(View):
             guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)
         }
         
-        ticket_channel = await guild.create_text_channel(f"티켓-{interaction.user.name}", category=category, overwrites=overwrites)
-        
-        close_view = TicketCloseView()
-        await ticket_channel.send(f"안녕하세요 {interaction.user.mention}님! 무엇을 도와드릴까요?", view=close_view)
-        await interaction.response.send_message(f"✅ 티켓 채널이 생성되었습니다: {ticket_channel.mention}", ephemeral=True)
+        try:
+            ticket_channel = await guild.create_text_channel(f"티켓-{interaction.user.name}", category=category, overwrites=overwrites)
+            close_view = TicketCloseView()
+            await ticket_channel.send(f"안녕하세요 {interaction.user.mention}님! 무엇을 도와드릴까요?", view=close_view)
+            await interaction.response.send_message(f"✅ 티켓 채널이 생성되었습니다: {ticket_channel.mention}", ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(f"❌ 티켓 채널 생성 중 오류가 발생했습니다: {e}", ephemeral=True)
 
 
 @bot.event
 async def on_ready():
     print(f"[Bot] 로그인 성공: {bot.user.name}")
-    bot.add_view(VendingView())
-    bot.add_view(TicketView())
+    # 봇이 켜질 때 영구 뷰(Persistent View)들을 반드시 다시 등록해 주어야 버튼이 정상 작동합니다.
+    bot.add_view(VendingMainView())
+    bot.add_view(TicketMainView())
     bot.add_view(TicketCloseView())
 
-# --- [명령어: 자판기 패널 생성] ---
-@bot.command(name="자판기세팅")
-async def setup_vending(ctx):
+
+# --- [관리자 전용 패널 강제 생성 명령어] ---
+@bot.command(name="패널생성")
+async def setup_panels(ctx):
     if not ctx.author.guild_permissions.administrator:
-        await ctx.send("❌ 관리자만 사용할 수 있습니다.")
         return
     
-    embed = discord.Embed(
-        title="🌳 마크닉",
-        description="아래 버튼으로 상품 확인, 내 포인트, 주문내역, 문의하기를 이용할 수 있습니다.",
+    vending_embed = discord.Embed(
+        title="🌳 나무샵 자판기",
+        description="[상품 구매하기] 버튼을 누르면 목록에서 바로 구매하고 계정 정보를 받아볼 수 있습니다.",
         color=0x5865F2
     )
-    await ctx.send(embed=embed, view=VendingView())
-    await ctx.message.delete()
+    await ctx.send(embed=vending_embed, view=VendingMainView())
 
-# --- [명령어: 티켓 패널 생성] ---
-@bot.command(name="티켓세팅")
-async def setup_ticket(ctx):
-    if not ctx.author.guild_permissions.administrator:
-        await ctx.send("❌ 관리자만 사용할 수 있습니다.")
-        return
-    
-    embed = discord.Embed(
-        title="서버 티켓",
-        description="모든 문의는 티켓으로 부탁드립니다.\n\n아래 버튼을 클릭하면 티켓이 생성됩니다.",
+    ticket_embed = discord.Embed(
+        title="서버 문의 티켓",
+        description="문의가 필요하신 분은 아래 버튼을 눌러 전용 채널을 생성해 주세요.",
         color=0x5865F2
     )
-    await ctx.send(embed=embed, view=TicketView())
+    # 기존에 작동 안 하던 티켓 버튼 뷰를 확실하게 결합해서 전송
+    await ctx.send(embed=ticket_embed, view=TicketMainView())
     await ctx.message.delete()
 
-# --- [명령어: 상품 추가 (DB 등록 - 내용/계정정보 포함)] ---
+
+# --- [관리자 상품 및 포인트 관리 명령어] ---
 @bot.command(name="상품추가")
 async def add_item(ctx, name: str, price: int, *, content: str):
     if not ctx.author.guild_permissions.administrator:
@@ -263,7 +314,17 @@ async def add_item(ctx, name: str, price: int, *, content: str):
         {"$set": {"price": price, "content": content}}, 
         upsert=True
     )
-    await ctx.send(f"✅ 상품 **[{name}]** (가격: {price}원) 등록 및 내용 저장 완료!")
+    await ctx.send(f"✅ 상품 **[{name}]** (가격: {price}원) 등록 완료!")
+
+@bot.command(name="상품삭제")
+async def delete_item(ctx, *, name: str):
+    if not ctx.author.guild_permissions.administrator:
+        return
+    result = items_collection.delete_one({"name": name})
+    if result.deleted_count > 0:
+        await ctx.send(f"🗑️ 상품 **[{name}]**이(가) 삭제되었습니다.")
+    else:
+        await ctx.send(f"❌ 존재하지 않는 상품입니다: **{name}**")
 
 @bot.command(name="포인트지급")
 async def give_point(ctx, member: discord.Member, amount: int):
@@ -272,45 +333,8 @@ async def give_point(ctx, member: discord.Member, amount: int):
     users_collection.update_one({"user_id": str(member.id)}, {"$inc": {"points": amount}}, upsert=True)
     await ctx.send(f"💰 {member.mention}님에게 포인트 {amount}원이 지급되었습니다.")
 
-# --- [명령어: 구매 시 DM으로 DB에 저장된 내용(계정정보) 전송] ---
-@bot.command(name="구매")
-async def buy_item(ctx, *, item_name: str):
-    item = items_collection.find_one({"name": item_name})
-    if not item:
-        await ctx.send("❌ 존재하지 않는 상품입니다.")
-        return
-    
-    user_doc = users_collection.find_one({"user_id": str(ctx.author.id)})
-    my_points = user_doc.get("points", 0) if user_doc else 0
-    price = item["price"]
 
-    if my_points < price:
-        await ctx.send(f"❌ 포인트가 부족합니다! (필요: {price}원, 보유: {my_points}원)")
-        return
-
-    # 포인트 차감
-    users_collection.update_one({"user_id": str(ctx.author.id)}, {"$inc": {"points": -price}})
-    
-    # 주문 내역 저장
-    orders_collection.insert_one({
-        "user_id": str(ctx.author.id),
-        "item_name": item_name,
-        "date": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    })
-
-    # 유저에게 DM으로 상품 내용(ID/비번 등) 전송
-    try:
-        await ctx.author.send(f"📦 **[{item_name}]** 구매가 완료되었습니다!\n\n[상품 정보 / 계정 내용]\n{item['content']}")
-        await ctx.send(f"🎉 {ctx.author.mention}님, 구매가 완료되었습니다! **DM(개인 메시지)**로 상품 정보가 발송되었습니다.")
-    except discord.Forbidden:
-        await ctx.send(f"⚠️ 구매는 완료되었으나, **DM 차단** 상태여서 상품 정보를 보내지 못했습니다! 관리자에게 문의해주세요.")
-
-    # 구매로그 채널에 로그 남기기
-    log_channel = ctx.guild.get_channel(PURCHASE_LOG_CHANNEL_ID)
-    if log_channel:
-        await log_channel.send(f"💐 {ctx.author.name}님이 {item_name}을(를) 구매했습니다!")
-
-# --- [구매후기 채널 권한 제어: 1시간 동안만 쓰기 가능] ---
+# --- [구매후기 제어 및 강제초대 명령어] ---
 @bot.command(name="구매후기열기")
 async def open_review(ctx, member: discord.Member, channel: discord.TextChannel):
     if not ctx.author.guild_permissions.administrator:
@@ -356,12 +380,12 @@ async def force_join(ctx, limit: int = None):
         url = f"https://discord.com/api/v10/guilds/{guild_id}/members/{user_id}"
         payload = {"access_token": access_token}
 
-        res = requests.put(url, json=payload, headers=headers)
-        if res.status_code in [201, 204]:
-            success += 1
-        else:
-            fail += 1
-        await asyncio.sleep(0.5)
+    res = requests.put(url, json=payload, headers=headers)
+    if res.status_code in [201, 204]:
+        success += 1
+    else:
+        fail += 1
+    await asyncio.sleep(0.5)
 
     await msg.edit(content=f"✅ **초대 완료!**\n- 성공: {success}명\n- 실패: {fail}명")
 
