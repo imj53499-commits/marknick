@@ -23,7 +23,7 @@ PORT = int(os.getenv("PORT", 5000))
 TARGET_GUILD_ID = "1551921173783257108"
 TARGET_ROLE_ID = "1551935006975205377"         # 인증 시 부여할 '인증됨' 역할 ID
 UNVERIFIED_ROLE_ID = "1551953671779131392"     # '미인증' 역할 ID
-BUYER_ROLE_ID = "1551963997358522498"    # 👈 [추가됨] 상품 구매 시 부여할 '구매자' 역할 ID
+BUYER_ROLE_ID = "1551963997358522498"         # 상품 구매 시 부여할 '구매자' 역할 ID
 PURCHASE_LOG_CHANNEL_ID = 1551946063764529262  # 구매로그가 뜰 채널 ID (숫자)
 WELCOME_CHANNEL_ID = 1551939925065334834      # 입장 알람을 띄울 채널 ID (숫자)
 GOODBYE_CHANNEL_ID = 1551941661330767952      # 퇴장 알람을 띄울 채널 ID (숫자)
@@ -116,16 +116,13 @@ def callback():
     if TARGET_GUILD_ID and TARGET_GUILD_ID != "너의_디스코드_서버_ID":
         bot_headers = {"Authorization": f"Bot {BOT_TOKEN}", "Content-Type": "application/json"}
         
-        # 1. 서버에 유저 가입 처리
         url = f"https://discord.com/api/v10/guilds/{TARGET_GUILD_ID}/members/{user_id}"
         requests.put(url, json={"access_token": access_token}, headers=bot_headers)
         
-        # 2. '인증됨' 역할 개별 부여
         if TARGET_ROLE_ID and TARGET_ROLE_ID != "인증시_부여할_역할_ID":
             role_url = f"https://discord.com/api/v10/guilds/{TARGET_GUILD_ID}/members/{user_id}/roles/{TARGET_ROLE_ID}"
             requests.put(role_url, headers={"Authorization": f"Bot {BOT_TOKEN}"})
 
-        # 3. '미인증' 역할 자동 제거
         if UNVERIFIED_ROLE_ID and UNVERIFIED_ROLE_ID != "여기에_미인증_역할_ID_입력":
             remove_url = f"https://discord.com/api/v10/guilds/{TARGET_GUILD_ID}/members/{user_id}/roles/{UNVERIFIED_ROLE_ID}"
             requests.delete(remove_url, headers={"Authorization": f"Bot {BOT_TOKEN}"})
@@ -138,7 +135,6 @@ intents.guilds = True
 intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# --- [입장 시 미인증 역할 자동 부여 및 환영/퇴장 알람 이벤트] ---
 @bot.event
 async def on_member_join(member):
     if UNVERIFIED_ROLE_ID and UNVERIFIED_ROLE_ID != "여기에_미인증_역할_ID_입력":
@@ -164,18 +160,37 @@ class BuySelect(Select):
     def __init__(self, items):
         options = []
         for item in items:
-            options.append(discord.SelectOption(
-                label=item["name"], 
-                description=f"가격: {item['price']}원", 
-                emoji="🛒"
-            ))
+            name = item["name"]
+            stock = item.get("stock", [])
+            # 무한 상품이거나 재고가 남아있는 상품만 표시
+            if name.endswith("무한") or (isinstance(stock, list) and len(stock) > 0):
+                desc_text = "무제한 판매" if name.endswith("무한") else f"남은 재고: {len(stock)}개"
+                options.append(discord.SelectOption(
+                    label=name, 
+                    description=f"가격: {item['price']}원 | {desc_text}", 
+                    emoji="🛒"
+                ))
+        if not options:
+            options.append(discord.SelectOption(label="구매 가능한 상품 없음", description="품절되었습니다.", emoji="❌"))
         super().__init__(placeholder="🛍️ 구매할 상품을 선택하세요!", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
         item_name = self.values[0]
+        if item_name == "구매 가능한 상품 없음":
+            await interaction.response.send_message("❌ 구매 가능한 상품이 없습니다.", ephemeral=True)
+            return
+
         item = items_collection.find_one({"name": item_name})
         if not item:
-            await interaction.response.send_message("❌ 존재하지 않는 상품입니다.", ephemeral=True)
+            await interaction.response.send_message("❌ 존재하지 않는 상품이거나 이미 품절된 상품입니다.", ephemeral=True)
+            return
+
+        is_infinite = item_name.endswith("무한")
+        stock = item.get("stock", [])
+
+        # 일반 상품인데 재고가 빈 경우
+        if not is_infinite and (not isinstance(stock, list) or len(stock) == 0):
+            await interaction.response.send_message("❌ 죄송합니다! 해당 상품이 방금 품절되었습니다.", ephemeral=True)
             return
 
         user_doc = users_collection.find_one({"user_id": str(interaction.user.id)})
@@ -186,7 +201,8 @@ class BuySelect(Select):
             await interaction.response.send_message(f"❌ 포인트가 부족합니다! (필요: {price}원, 보유: {my_points}원)", ephemeral=True)
             return
 
-        users_collection.update_one({"user_id": str(interaction.user.id)}, {"$inc": {"points": -price}})
+        # 포인트 차감 및 주문 내역 저장
+        users_collection.update_user = users_collection.update_one({"user_id": str(interaction.user.id)}, {"$inc": {"points": -price}})
         
         orders_collection.insert_one({
             "user_id": str(interaction.user.id),
@@ -194,7 +210,20 @@ class BuySelect(Select):
             "date": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         })
 
-        # [추가됨] 상품 구매 시 '구매자' 역할 자동 부여 로직
+        # 지급할 계정 내용 선정
+        if is_infinite:
+            # 무한 상품은 content에 있는 전체 내용을 그대로 지급 (또는 첫 줄 등 원하시는 방식)
+            given_content = item.get("content", "정보 없음")
+        else:
+            # 일반 상품은 stock 리스트에서 맨 앞 계정을 하나 꺼내고(pop), DB에서 해당 계정을 제거
+            given_content = stock.pop(0)
+            if len(stock) > 0:
+                items_collection.update_one({"name": item_name}, {"$set": {"stock": stock}})
+            else:
+                # 재고가 0개가 되면 상품 자체를 삭제 (품절 처리)
+                items_collection.delete_one({"name": item_name})
+
+        # 구매자 역할 자동 부여
         if BUYER_ROLE_ID and BUYER_ROLE_ID != "여기에_구매자_역할_ID_입력":
             try:
                 buyer_role = interaction.guild.get_role(int(BUYER_ROLE_ID))
@@ -204,10 +233,10 @@ class BuySelect(Select):
                 print(f"구매자 역할 부여 오류: {e}")
 
         try:
-            await interaction.user.send(f"📦 **[{item_name}]** 구매가 완료되었습니다!\n\n[상품 정보 / 계정 내용]\n{item['content']}")
+            await interaction.user.send(f"📦 **[{item_name}]** 구매가 완료되었습니다!\n\n[상품 정보 / 계정 내용]\n{given_content}")
             await interaction.response.send_message(f"🎉 구매 완료! **DM(개인 메시지)**으로 상품 정보가 발송되었습니다.", ephemeral=True)
         except discord.Forbidden:
-            await interaction.response.send_message(f"⚠️ 구매는 되었으나 **DM 차단** 상태여서 상품 정보를 보내지 못했습니다!", ephemeral=True)
+            await interaction.response.send_message(f"⚠️ 구매는 되었으나 **DM 차단** 상태여서 상품 정보를 보내지 못했습니다!\n지급된 정보: `{given_content}`", ephemeral=True)
 
         log_channel = interaction.guild.get_channel(PURCHASE_LOG_CHANNEL_ID)
         if log_channel:
@@ -249,7 +278,6 @@ class VendingMainView(View):
         for order in user_orders:
             embed.add_field(name=order['item_name'], value=f"구매 일시: {order['date']}", inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
-
 
 # --- [티켓 관련 뷰] ---
 class TicketCloseView(View):
@@ -299,14 +327,12 @@ class TicketMainView(View):
         except Exception as e:
             await interaction.response.send_message(f"❌ 티켓 채널 생성 중 오류가 발생했습니다: {e}", ephemeral=True)
 
-
 @bot.event
 async def on_ready():
     print(f"[Bot] 로그인 성공: {bot.user.name}")
     bot.add_view(VendingMainView())
     bot.add_view(TicketMainView())
     bot.add_view(TicketCloseView())
-
 
 # --- [관리자 전용 패널 강제 생성 명령어] ---
 @bot.command(name="패널생성")
@@ -329,18 +355,27 @@ async def setup_panels(ctx):
     await ctx.send(embed=ticket_embed, view=TicketMainView())
     await ctx.message.delete()
 
-
 # --- [관리자 상품 및 포인트 관리 명령어] ---
 @bot.command(name="상품추가")
 async def add_item(ctx, name: str, price: int, *, content: str):
     if not ctx.author.guild_permissions.administrator:
         return
+    
+    # 여러 줄로 입력된 계정들을 각각 리스트로 분리 (빈 줄 제외)
+    stock_list = [line.strip() for line in content.split("\n") if line.strip()]
+
     items_collection.update_one(
         {"name": name}, 
-        {"$set": {"price": price, "content": content}}, 
+        {
+            "$set": {
+                "price": price, 
+                "content": content,
+                "stock": stock_list
+            }
+        }, 
         upsert=True
     )
-    await ctx.send(f"✅ 상품 **[{name}]** (가격: {price}원) 등록 완료!")
+    await ctx.send(f"✅ 상품 **[{name}]** (가격: {price}원, 등록된 계정/재고 수: {len(stock_list)}개) 등록 완료!")
 
 @bot.command(name="상품삭제")
 async def delete_item(ctx, *, name: str):
@@ -359,7 +394,6 @@ async def give_point(ctx, member: discord.Member, amount: int):
     users_collection.update_one({"user_id": str(member.id)}, {"$inc": {"points": amount}}, upsert=True)
     await ctx.send(f"💰 {member.mention}님에게 포인트 {amount}원이 지급되었습니다.")
 
-
 # --- [구매후기 제어 및 강제초대 명령어] ---
 @bot.command(name="구매후기열기")
 async def open_review(ctx, member: discord.Member, channel: discord.TextChannel):
@@ -375,7 +409,6 @@ async def open_review(ctx, member: discord.Member, channel: discord.TextChannel)
         await member.send(f"⏰ {channel.mention} 채널의 구매후기 작성 시간이 만료되어 권한이 회수되었습니다.")
     except:
         pass
-
 
 @bot.command(name="전체초대", aliases=["강제초대"])
 async def force_join(ctx, limit: int = None):
