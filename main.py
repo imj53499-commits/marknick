@@ -1,5 +1,4 @@
 import os
-import json
 import asyncio
 import threading
 import requests
@@ -7,6 +6,7 @@ from flask import Flask, request, redirect, render_template_string
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
+from pymongo import MongoClient
 
 load_dotenv()
 
@@ -17,31 +17,34 @@ REDIRECT_URI = os.getenv("REDIRECT_URI")
 OAUTH2_URL = os.getenv("OAUTH2_URL")
 PORT = int(os.getenv("PORT", 5000))
 
-# ⚠️ 여기에 네 디스코드 서버 ID를 꼭 넣어줘!
-TARGET_GUILD_ID = "1503013871307456645"  # 예: "123456789012345678"
+# ⚠️ 여기에 네 디스코드 서버 ID를 숫자로 꼭 넣어줘!
+TARGET_GUILD_ID = "너의_디스코드_서버_ID"  # 예: "123456789012345678"
 
-# ⚠️ [중요] 특정 관리자들의 디스코드 유저 ID를 여기에 쭉 적어주세요! (문자열 형태)
+# 특정 관리자들의 디스코드 유저 ID 리스트
 ALLOWED_ADMIN_IDS = [
-    "123456789012345678",  # 관리자 A의 디스코드 ID
-    "876543210987654321",  # 관리자 B의 디스코드 ID
+    "123456789012345678",  # 관리자 A의 ID
 ]
 
-TOKEN_FILE = "tokens.json"
+# MongoDB Atlas 연결 설정
+MONGO_URI = os.getenv("MONGO_URI")
+mongo_client = MongoClient(MONGO_URI)
+db = mongo_client["discord_bot_db"]
+tokens_collection = db["tokens"]
 
 def load_tokens():
-    if not os.path.exists(TOKEN_FILE):
-        return {}
-    try:
-        with open(TOKEN_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except:
-        return {}
+    # MongoDB에서 모든 토큰을 불러와서 기존 딕셔너리 형태로 변환
+    tokens = {}
+    for doc in tokens_collection.find():
+        tokens[str(doc["user_id"])] = doc["access_token"]
+    return tokens
 
 def save_token(user_id, access_token):
-    tokens = load_tokens()
-    tokens[user_id] = access_token
-    with open(TOKEN_FILE, "w", encoding="utf-8") as f:
-        json.dump(tokens, f, indent=4)
+    # MongoDB에 유저 ID가 있으면 갱신하고, 없으면 새로 저장 (upsert=True)
+    tokens_collection.update_one(
+        {"user_id": str(user_id)},
+        {"$set": {"access_token": access_token}},
+        upsert=True
+    )
 
 app = Flask(__name__)
 
@@ -131,7 +134,7 @@ def callback():
     user_id = user_data.get("id")
     username = user_data.get("username")
 
-    # 1. 토큰 파일에 자동 저장
+    # 1. MongoDB에 자동 저장
     save_token(user_id, access_token)
 
     # 2. 로그인하자마자 곧바로 서버로 강제 초대 요청 날리기
@@ -156,7 +159,6 @@ async def on_ready():
 
 @bot.command(name="전체초대", aliases=["강제초대"])
 async def force_join(ctx, limit: int = None):
-    # 권한 체크: 디스코드 서버 관리자 권한이 있거나, 지정된 관리자 ID 목록에 포함된 경우만 통과
     is_admin = ctx.author.guild_permissions.administrator
     is_allowed_user = str(ctx.author.id) in ALLOWED_ADMIN_IDS
 
