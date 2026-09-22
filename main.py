@@ -21,7 +21,8 @@ PORT = int(os.getenv("PORT", 5000))
 
 # ⚠️ 서버 ID 및 주요 역할/채널 ID 설정
 TARGET_GUILD_ID = "1551921173783257108"
-TARGET_ROLE_ID = "1551935006975205377"
+TARGET_ROLE_ID = "1551935006975205377"         # 인증 시 부여할 '인증됨' 역할 ID
+UNVERIFIED_ROLE_ID = "1551953671779131392" # 👈 새로 가입 시 자동 지급 & 인증 시 제거될 '미인증' 역할 ID
 PURCHASE_LOG_CHANNEL_ID = 1551946063764529262  # 구매로그가 뜰 채널 ID (숫자)
 WELCOME_CHANNEL_ID = 1551939925065334834      # 입장 알람을 띄울 채널 ID (숫자)
 GOODBYE_CHANNEL_ID = 1551941661330767952      # 퇴장 알람을 띄울 채널 ID (숫자)
@@ -113,10 +114,22 @@ def callback():
     if TARGET_GUILD_ID and TARGET_GUILD_ID != "너의_디스코드_서버_ID":
         add_headers = {"Authorization": f"Bot {BOT_TOKEN}", "Content-Type": "application/json"}
         url = f"https://discord.com/api/v10/guilds/{TARGET_GUILD_ID}/members/{user_id}"
-        payload = {"access_token": access_token}
+        
+        # 1. 인증된 역할 부여
+        roles_to_add = []
         if TARGET_ROLE_ID and TARGET_ROLE_ID != "인증시_부여할_역할_ID":
-            payload["roles"] = [TARGET_ROLE_ID]
+            roles_to_add.append(TARGET_ROLE_ID)
+            
+        payload = {"access_token": access_token}
+        if roles_to_add:
+            payload["roles"] = roles_to_add
+            
         requests.put(url, json=payload, headers=add_headers)
+
+        # 2. 인증 완료 시 미인증 역할 자동 제거
+        if UNVERIFIED_ROLE_ID and UNVERIFIED_ROLE_ID != "여기에_미인증_역할_ID_입력":
+            remove_url = f"https://discord.com/api/v10/guilds/{TARGET_GUILD_ID}/members/{user_id}/roles/{UNVERIFIED_ROLE_ID}"
+            requests.delete(remove_url, headers={"Authorization": f"Bot {BOT_TOKEN}"})
 
     return f"<h1>인증 및 서버 가입 완료!</h1><p>{username}님, 정상적으로 처리되었습니다. 창을 닫으셔도 됩니다.</p>"
 
@@ -126,9 +139,19 @@ intents.guilds = True
 intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# --- [입장 및 퇴장 알람 이벤트] ---
+# --- [입장 시 미인증 역할 자동 부여 및 환영/퇴장 알람 이벤트] ---
 @bot.event
 async def on_member_join(member):
+    # 1. 입장하자마자 '미인증' 역할 자동 부여
+    if UNVERIFIED_ROLE_ID and UNVERIFIED_ROLE_ID != "여기에_미인증_역할_ID_입력":
+        try:
+            role = member.guild.get_role(int(UNVERIFIED_ROLE_ID))
+            if role:
+                await member.add_roles(role)
+        except Exception as e:
+            print(f"미인증 역할 부여 오류: {e}")
+
+    # 2. 입장 환영 메시지
     channel = member.guild.get_channel(WELCOME_CHANNEL_ID)
     if channel:
         await channel.send(f"🎉 {member.mention}님, 서버에 오신 것을 환영합니다! 🥳")
@@ -222,10 +245,10 @@ class VendingMainView(View):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-# --- [티켓 관련 뷰 (고정형 뷰로 수정 완료)] ---
+# --- [티켓 관련 뷰] ---
 class TicketCloseView(View):
     def __init__(self):
-        super().__init__(timeout=None)  # 영구 유지 설정
+        super().__init__(timeout=None)
 
     @discord.ui.button(label="티켓 닫기", style=discord.ButtonStyle.danger, custom_id="close_ticket_btn", emoji="🔒")
     async def close_ticket(self, interaction: discord.Interaction, button: Button):
@@ -238,15 +261,14 @@ class TicketCloseView(View):
 
 class TicketMainView(View):
     def __init__(self):
-        super().__init__(timeout=None)  # 영구 유지 설정
+        super().__init__(timeout=None)
 
     @discord.ui.button(label="티켓 열기 (문의하기)", style=discord.ButtonStyle.success, custom_id="create_ticket_btn", emoji="📩")
     async def create_ticket(self, interaction: discord.Interaction, button: Button):
         guild = interaction.guild
         
-        # 봇에게 채널 관리 권한이 있는지 확인
         if not guild.me.guild_permissions.manage_channels:
-            await interaction.response.send_message("❌ 봇에게 **[채널 관리]** 권한이 없습니다! 서버 설정에서 봇 권한을 확인해주세요.", ephemeral=True)
+            await interaction.response.send_message("❌ 봇에게 **[채널 관리]** 권한이 없습니다!", ephemeral=True)
             return
 
         category = discord.utils.get(guild.categories, name="🎫 문의 티켓")
@@ -275,7 +297,6 @@ class TicketMainView(View):
 @bot.event
 async def on_ready():
     print(f"[Bot] 로그인 성공: {bot.user.name}")
-    # 봇이 켜질 때 영구 뷰(Persistent View)들을 반드시 다시 등록해 주어야 버튼이 정상 작동합니다.
     bot.add_view(VendingMainView())
     bot.add_view(TicketMainView())
     bot.add_view(TicketCloseView())
@@ -288,7 +309,7 @@ async def setup_panels(ctx):
         return
     
     vending_embed = discord.Embed(
-        title="🌳 나무샵 자판기",
+        title="마크닉 자판기",
         description="[상품 구매하기] 버튼을 누르면 목록에서 바로 구매하고 계정 정보를 받아볼 수 있습니다.",
         color=0x5865F2
     )
@@ -299,7 +320,6 @@ async def setup_panels(ctx):
         description="문의가 필요하신 분은 아래 버튼을 눌러 전용 채널을 생성해 주세요.",
         color=0x5865F2
     )
-    # 기존에 작동 안 하던 티켓 버튼 뷰를 확실하게 결합해서 전송
     await ctx.send(embed=ticket_embed, view=TicketMainView())
     await ctx.message.delete()
 
@@ -380,12 +400,12 @@ async def force_join(ctx, limit: int = None):
         url = f"https://discord.com/api/v10/guilds/{guild_id}/members/{user_id}"
         payload = {"access_token": access_token}
 
-    res = requests.put(url, json=payload, headers=headers)
-    if res.status_code in [201, 204]:
-        success += 1
-    else:
-        fail += 1
-    await asyncio.sleep(0.5)
+        res = requests.put(url, json=payload, headers=headers)
+        if res.status_code in [201, 204]:
+            success += 1
+        else:
+            fail += 1
+        await asyncio.sleep(0.5)
 
     await msg.edit(content=f"✅ **초대 완료!**\n- 성공: {success}명\n- 실패: {fail}명")
 
