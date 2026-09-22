@@ -22,7 +22,8 @@ PORT = int(os.getenv("PORT", 5000))
 # ⚠️ 서버 ID 및 주요 역할/채널 ID 설정
 TARGET_GUILD_ID = "1551921173783257108"
 TARGET_ROLE_ID = "1551935006975205377"         # 인증 시 부여할 '인증됨' 역할 ID
-UNVERIFIED_ROLE_ID = "1551953671779131392" # 👈 '미인증' 역할 ID
+UNVERIFIED_ROLE_ID = "1551953671779131392"     # '미인증' 역할 ID
+BUYER_ROLE_ID = "1551963997358522498"    # 👈 [추가됨] 상품 구매 시 부여할 '구매자' 역할 ID
 PURCHASE_LOG_CHANNEL_ID = 1551946063764529262  # 구매로그가 뜰 채널 ID (숫자)
 WELCOME_CHANNEL_ID = 1551939925065334834      # 입장 알람을 띄울 채널 ID (숫자)
 GOODBYE_CHANNEL_ID = 1551941661330767952      # 퇴장 알람을 띄울 채널 ID (숫자)
@@ -119,17 +120,15 @@ def callback():
         url = f"https://discord.com/api/v10/guilds/{TARGET_GUILD_ID}/members/{user_id}"
         requests.put(url, json={"access_token": access_token}, headers=bot_headers)
         
-        # 2. '인증됨' 역할 개별 부여 (디버그 코드 포함)
+        # 2. '인증됨' 역할 개별 부여
         if TARGET_ROLE_ID and TARGET_ROLE_ID != "인증시_부여할_역할_ID":
             role_url = f"https://discord.com/api/v10/guilds/{TARGET_GUILD_ID}/members/{user_id}/roles/{TARGET_ROLE_ID}"
-            role_res = requests.put(role_url, headers={"Authorization": f"Bot {BOT_TOKEN}"})
-            print(f"[디버그] 인증됨 역할 부여 결과 코드: {role_res.status_code}, 내용: {role_res.text}")
+            requests.put(role_url, headers={"Authorization": f"Bot {BOT_TOKEN}"})
 
-        # 3. '미인증' 역할 자동 제거 (디버그 코드 포함)
+        # 3. '미인증' 역할 자동 제거
         if UNVERIFIED_ROLE_ID and UNVERIFIED_ROLE_ID != "여기에_미인증_역할_ID_입력":
             remove_url = f"https://discord.com/api/v10/guilds/{TARGET_GUILD_ID}/members/{user_id}/roles/{UNVERIFIED_ROLE_ID}"
-            remove_res = requests.delete(remove_url, headers={"Authorization": f"Bot {BOT_TOKEN}"})
-            print(f"[디버그] 미인증 역할 제거 결과 코드: {remove_res.status_code}")
+            requests.delete(remove_url, headers={"Authorization": f"Bot {BOT_TOKEN}"})
 
     return f"<h1>인증 및 서버 가입 완료!</h1><p>{username}님, 정상적으로 처리되었습니다. 창을 닫으셔도 됩니다.</p>"
 
@@ -194,6 +193,15 @@ class BuySelect(Select):
             "item_name": item_name,
             "date": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         })
+
+        # [추가됨] 상품 구매 시 '구매자' 역할 자동 부여 로직
+        if BUYER_ROLE_ID and BUYER_ROLE_ID != "여기에_구매자_역할_ID_입력":
+            try:
+                buyer_role = interaction.guild.get_role(int(BUYER_ROLE_ID))
+                if buyer_role and buyer_role not in interaction.user.roles:
+                    await interaction.user.add_roles(buyer_role)
+            except Exception as e:
+                print(f"구매자 역할 부여 오류: {e}")
 
         try:
             await interaction.user.send(f"📦 **[{item_name}]** 구매가 완료되었습니다!\n\n[상품 정보 / 계정 내용]\n{item['content']}")
