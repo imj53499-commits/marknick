@@ -22,13 +22,11 @@ PORT = int(os.getenv("PORT", 5000))
 # ⚠️ 서버 ID 및 주요 역할/채널 ID 설정
 TARGET_GUILD_ID = "1551921173783257108"
 TARGET_ROLE_ID = "1551935006975205377"
-PURCHASE_LOG_CHANNEL_ID = 123456789012345678  # 구매로그가 뜰 채널 ID (숫자)
+PURCHASE_LOG_CHANNEL_ID = 1551946063764529262  # 구매로그가 뜰 채널 ID (숫자)
 WELCOME_CHANNEL_ID = 1551939925065334834      # 입장 알람을 띄울 채널 ID (숫자)
-GOODBYE_CHANNEL_ID = 1551941661330767952     # 퇴장 알람을 띄울 채널 ID (숫자)
+GOODBYE_CHANNEL_ID = 1551941661330767952      # 퇴장 알람을 띄울 채널 ID (숫자)
 
 ALLOWED_ADMIN_IDS = [
-
-    
     "1503013871307456645",  # 관리자 ID
 ]
 
@@ -38,7 +36,7 @@ mongo_client = MongoClient(MONGO_URI)
 db = mongo_client["discord_bot_db"]
 tokens_collection = db["tokens"]
 users_collection = db["users"]       # 유저 포인트 정보 저장
-items_collection = db["items"]       # 자판기 상품 정보 저장
+items_collection = db["items"]       # 자판기 상품 정보 (이름, 가격, 내용/계정정보) 저장
 orders_collection = db["orders"]     # 주문 내역 저장
 
 def load_tokens():
@@ -141,7 +139,7 @@ async def on_member_remove(member):
     if channel:
         await channel.send(f"👋 **{member.name}**님이 서버를 나가셨습니다...")
 
-# --- [자판기 및 패널 인터페이스 클래스] ---
+# --- [자판기 패널 인터페이스 클래스 (장바구니 제거됨)] ---
 class VendingView(View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -153,9 +151,9 @@ class VendingView(View):
             await interaction.response.send_message("❌ 현재 등록된 상품이 없습니다.", ephemeral=True)
             return
         
-        embed = discord.Embed(title="🌳 마크닉 상품 목록", description="구매할 상품의 번호나 이름을 확인하세요.", color=0x5865F2)
+        embed = discord.Embed(title="🌳 마크닉 상품 목록", description="구매하려면 `!구매 [상품이름]` 명령어를 입력하세요!", color=0x5865F2)
         for idx, item in enumerate(items, 1):
-            embed.add_field(name=f"{idx}. {item['name']}", value=f"가격: {item['price']}원 / 역할ID: `<@{item['role_id']}>`", inline=False)
+            embed.add_field(name=f"{idx}. {item['name']}", value=f"가격: {item['price']}원", inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @discord.ui.button(label="내 포인트", style=discord.ButtonStyle.primary, custom_id="shop_my_points", emoji="💰")
@@ -163,10 +161,6 @@ class VendingView(View):
         user_data = users_collection.find_one({"user_id": str(interaction.user.id)})
         points = user_data.get("points", 0) if user_data else 0
         await interaction.response.send_message(f"💳 현재 **{interaction.user.name}**님의 잔액은 **{points}원** 입니다.", ephemeral=True)
-
-    @discord.ui.button(label="장바구니", style=discord.ButtonStyle.secondary, custom_id="shop_cart", emoji="🛍️")
-    async def cart(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.send_message("🛍️ 장바구니 기능은 준비 중입니다. 상품 보기 후 구매 명령어를 이용해 주세요!", ephemeral=True)
 
     @discord.ui.button(label="주문내역", style=discord.ButtonStyle.secondary, custom_id="shop_orders", emoji="📦")
     async def orders(self, interaction: discord.Interaction, button: Button):
@@ -184,7 +178,20 @@ class VendingView(View):
     async def inquiry(self, interaction: discord.Interaction, button: Button):
         await interaction.response.send_message("🎫 문의는 서버 내 티켓 생성 채널의 [티켓 열기] 버튼을 이용해 주세요!", ephemeral=True)
 
-# --- [티켓 생성 뷰] ---
+# --- [티켓 생성 및 닫기 뷰 (안정성 강화)] ---
+class TicketCloseView(View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="티켓 닫기", style=discord.ButtonStyle.danger, custom_id="close_ticket_btn", emoji="🔒")
+    async def close_ticket(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.send_message("🔒 잠시 후 티켓 채널이 삭제됩니다...")
+        await asyncio.sleep(3)
+        try:
+            await interaction.channel.delete()
+        except:
+            pass
+
 class TicketView(View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -208,16 +215,6 @@ class TicketView(View):
         await ticket_channel.send(f"안녕하세요 {interaction.user.mention}님! 무엇을 도와드릴까요?", view=close_view)
         await interaction.response.send_message(f"✅ 티켓 채널이 생성되었습니다: {ticket_channel.mention}", ephemeral=True)
 
-class TicketCloseView(View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label="티켓 닫기", style=discord.ButtonStyle.danger, custom_id="close_ticket_btn", emoji="🔒")
-    async def close_ticket(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.send_message("🔒 잠시 후 티켓 채널이 삭제됩니다...")
-        await asyncio.sleep(3)
-        await interaction.channel.delete()
-
 
 @bot.event
 async def on_ready():
@@ -235,7 +232,7 @@ async def setup_vending(ctx):
     
     embed = discord.Embed(
         title="🌳 마크닉",
-        description="아래 버튼으로 상품 확인, 내 포인트, 장바구니, 주문내역, 문의하기를 이용할 수 있습니다.",
+        description="아래 버튼으로 상품 확인, 내 포인트, 주문내역, 문의하기를 이용할 수 있습니다.",
         color=0x5865F2
     )
     await ctx.send(embed=embed, view=VendingView())
@@ -256,13 +253,17 @@ async def setup_ticket(ctx):
     await ctx.send(embed=embed, view=TicketView())
     await ctx.message.delete()
 
-# --- [명령어: 상품 추가/포인트지급/구매] ---
+# --- [명령어: 상품 추가 (DB 등록 - 내용/계정정보 포함)] ---
 @bot.command(name="상품추가")
-async def add_item(ctx, name: str, price: int, role_id: int):
+async def add_item(ctx, name: str, price: int, *, content: str):
     if not ctx.author.guild_permissions.administrator:
         return
-    items_collection.update_one({"name": name}, {"$set": {"price": price, "role_id": str(role_id)}}, upsert=True)
-    await ctx.send(f"✅ 상품 **[{name}]** (가격: {price}원) 등록 완료!")
+    items_collection.update_one(
+        {"name": name}, 
+        {"$set": {"price": price, "content": content}}, 
+        upsert=True
+    )
+    await ctx.send(f"✅ 상품 **[{name}]** (가격: {price}원) 등록 및 내용 저장 완료!")
 
 @bot.command(name="포인트지급")
 async def give_point(ctx, member: discord.Member, amount: int):
@@ -271,6 +272,7 @@ async def give_point(ctx, member: discord.Member, amount: int):
     users_collection.update_one({"user_id": str(member.id)}, {"$inc": {"points": amount}}, upsert=True)
     await ctx.send(f"💰 {member.mention}님에게 포인트 {amount}원이 지급되었습니다.")
 
+# --- [명령어: 구매 시 DM으로 DB에 저장된 내용(계정정보) 전송] ---
 @bot.command(name="구매")
 async def buy_item(ctx, *, item_name: str):
     item = items_collection.find_one({"name": item_name})
@@ -286,20 +288,24 @@ async def buy_item(ctx, *, item_name: str):
         await ctx.send(f"❌ 포인트가 부족합니다! (필요: {price}원, 보유: {my_points}원)")
         return
 
+    # 포인트 차감
     users_collection.update_one({"user_id": str(ctx.author.id)}, {"$inc": {"points": -price}})
     
-    role = ctx.guild.get_role(int(item["role_id"]))
-    if role:
-        await ctx.author.add_roles(role)
-
+    # 주문 내역 저장
     orders_collection.insert_one({
         "user_id": str(ctx.author.id),
         "item_name": item_name,
         "date": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     })
 
-    await ctx.send(f"🎉 성공적으로 **{item_name}**을(를) 구매했습니다! 역할이 지급되었습니다.")
+    # 유저에게 DM으로 상품 내용(ID/비번 등) 전송
+    try:
+        await ctx.author.send(f"📦 **[{item_name}]** 구매가 완료되었습니다!\n\n[상품 정보 / 계정 내용]\n{item['content']}")
+        await ctx.send(f"🎉 {ctx.author.mention}님, 구매가 완료되었습니다! **DM(개인 메시지)**로 상품 정보가 발송되었습니다.")
+    except discord.Forbidden:
+        await ctx.send(f"⚠️ 구매는 완료되었으나, **DM 차단** 상태여서 상품 정보를 보내지 못했습니다! 관리자에게 문의해주세요.")
 
+    # 구매로그 채널에 로그 남기기
     log_channel = ctx.guild.get_channel(PURCHASE_LOG_CHANNEL_ID)
     if log_channel:
         await log_channel.send(f"💐 {ctx.author.name}님이 {item_name}을(를) 구매했습니다!")
