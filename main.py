@@ -27,6 +27,8 @@ WELCOME_CHANNEL_ID = 1551939925065334834      # 입장 알람을 띄울 채널 I
 GOODBYE_CHANNEL_ID = 1551941661330767952     # 퇴장 알람을 띄울 채널 ID (숫자)
 
 ALLOWED_ADMIN_IDS = [
+
+    
     "1503013871307456645",  # 관리자 ID
 ]
 
@@ -151,7 +153,7 @@ class VendingView(View):
             await interaction.response.send_message("❌ 현재 등록된 상품이 없습니다.", ephemeral=True)
             return
         
-        embed = discord.Embed(title="🎨 자비샵 상품 목록", description="구매할 상품의 번호나 이름을 확인하세요.", color=0x5865F2)
+        embed = discord.Embed(title="🌳 마크닉 상품 목록", description="구매할 상품의 번호나 이름을 확인하세요.", color=0x5865F2)
         for idx, item in enumerate(items, 1):
             embed.add_field(name=f"{idx}. {item['name']}", value=f"가격: {item['price']}원 / 역할ID: `<@{item['role_id']}>`", inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -232,7 +234,7 @@ async def setup_vending(ctx):
         return
     
     embed = discord.Embed(
-        title="🎨 자비샵",
+        title="🌳 마크닉",
         description="아래 버튼으로 상품 확인, 내 포인트, 장바구니, 주문내역, 문의하기를 이용할 수 있습니다.",
         color=0x5865F2
     )
