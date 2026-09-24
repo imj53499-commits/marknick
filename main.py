@@ -162,7 +162,6 @@ class BuySelect(Select):
         for item in items:
             name = item["name"]
             stock = item.get("stock", [])
-            # 무한 상품이거나 재고가 남아있는 상품만 표시
             if name.endswith("무한") or (isinstance(stock, list) and len(stock) > 0):
                 desc_text = "무제한 판매" if name.endswith("무한") else f"남은 재고: {len(stock)}개"
                 options.append(discord.SelectOption(
@@ -188,7 +187,6 @@ class BuySelect(Select):
         is_infinite = item_name.endswith("무한")
         stock = item.get("stock", [])
 
-        # 일반 상품인데 재고가 빈 경우
         if not is_infinite and (not isinstance(stock, list) or len(stock) == 0):
             await interaction.response.send_message("❌ 죄송합니다! 해당 상품이 방금 품절되었습니다.", ephemeral=True)
             return
@@ -201,8 +199,7 @@ class BuySelect(Select):
             await interaction.response.send_message(f"❌ 포인트가 부족합니다! (필요: {price}원, 보유: {my_points}원)", ephemeral=True)
             return
 
-        # 포인트 차감 및 주문 내역 저장
-        users_collection.update_user = users_collection.update_one({"user_id": str(interaction.user.id)}, {"$inc": {"points": -price}})
+        users_collection.update_one({"user_id": str(interaction.user.id)}, {"$inc": {"points": -price}})
         
         orders_collection.insert_one({
             "user_id": str(interaction.user.id),
@@ -210,20 +207,15 @@ class BuySelect(Select):
             "date": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         })
 
-        # 지급할 계정 내용 선정
         if is_infinite:
-            # 무한 상품은 content에 있는 전체 내용을 그대로 지급 (또는 첫 줄 등 원하시는 방식)
             given_content = item.get("content", "정보 없음")
         else:
-            # 일반 상품은 stock 리스트에서 맨 앞 계정을 하나 꺼내고(pop), DB에서 해당 계정을 제거
             given_content = stock.pop(0)
             if len(stock) > 0:
                 items_collection.update_one({"name": item_name}, {"$set": {"stock": stock}})
             else:
-                # 재고가 0개가 되면 상품 자체를 삭제 (품절 처리)
                 items_collection.delete_one({"name": item_name})
 
-        # 구매자 역할 자동 부여
         if BUYER_ROLE_ID and BUYER_ROLE_ID != "여기에_구매자_역할_ID_입력":
             try:
                 buyer_role = interaction.guild.get_role(int(BUYER_ROLE_ID))
@@ -361,7 +353,6 @@ async def add_item(ctx, name: str, price: int, *, content: str):
     if not ctx.author.guild_permissions.administrator:
         return
     
-    # 여러 줄로 입력된 계정들을 각각 리스트로 분리 (빈 줄 제외)
     stock_list = [line.strip() for line in content.split("\n") if line.strip()]
 
     items_collection.update_one(
@@ -375,7 +366,44 @@ async def add_item(ctx, name: str, price: int, *, content: str):
         }, 
         upsert=True
     )
-    await ctx.send(f"✅ 상품 **[{name}]** (가격: {price}원, 등록된 계정/재고 수: {len(stock_list)}개) 등록 완료!")
+    await ctx.send(f"✅ 상품 **[{name}]** (가격: {price}원, 등록된 재고 수: {len(stock_list)}개) 등록 완료!")
+
+# --- [텍스트 파일로 상품 재고 추가 명령어] ---
+@bot.command(name="상품파일추가")
+async def add_item_by_file(ctx, name: str, price: int):
+    if not ctx.author.guild_permissions.administrator:
+        return
+
+    if not ctx.message.attachments:
+        await ctx.send("❌ 등록할 `.txt` 파일을 첨부하고 명령어를 입력해주세요!")
+        return
+
+    attachment = ctx.message.attachments[0]
+    if not attachment.filename.endswith(".txt"):
+        await ctx.send("❌ `.txt` 형식의 텍스트 파일만 업로드 가능합니다.")
+        return
+
+    try:
+        file_bytes = await attachment.read()
+        content = file_bytes.decode("utf-8")
+    except Exception as e:
+        await ctx.send(f"❌ 파일을 읽는 중 오류가 발생했습니다: {e}")
+        return
+
+    stock_list = [line.strip() for line in content.split("\n") if line.strip()]
+
+    items_collection.update_one(
+        {"name": name}, 
+        {
+            "$set": {
+                "price": price, 
+                "content": content,
+                "stock": stock_list
+            }
+        }, 
+        upsert=True
+    )
+    await ctx.send(f"파일 업로드 완료! ✅ 상품 **[{name}]** (가격: {price}원, 파일에서 불러온 재고 수: {len(stock_list)}개) 등록 완료!")
 
 @bot.command(name="상품삭제")
 async def delete_item(ctx, *, name: str):
