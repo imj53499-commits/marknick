@@ -347,63 +347,57 @@ async def setup_panels(ctx):
     await ctx.send(embed=ticket_embed, view=TicketMainView())
     await ctx.message.delete()
 
-# --- [관리자 상품 및 포인트 관리 명령어] ---
+# --- [통합 상품 추가 명령어 (텍스트, 파일, URL 자동 지원)] ---
 @bot.command(name="상품추가")
-async def add_item(ctx, name: str, price: int, *, content: str):
+async def add_item(ctx, name: str, price: int, *, content: str = None):
     if not ctx.author.guild_permissions.administrator:
         return
     
-    stock_list = [line.strip() for line in content.split("\n") if line.strip()]
+    raw_content = ""
+
+    # 1. 첨부파일(txt)이 있는 경우 파일 내용 읽기
+    if ctx.message.attachments:
+        attachment = ctx.message.attachments[0]
+        try:
+            file_bytes = await attachment.read()
+            raw_content = file_bytes.decode("utf-8")
+        except Exception as e:
+            await ctx.send(f"❌ 파일을 읽는 중 오류가 발생했습니다: {e}")
+            return
+            
+    # 2. 메시지 본문이나 텍스트로 링크(URL)나 텍스트가 같이 들어온 경우
+    elif content:
+        # 만약 본문에 http 링크가 포함되어 있다면 해당 주소의 텍스트 내용을 긁어올 수도 있음
+        if content.startswith("http://") or content.startswith("https://"):
+            try:
+                res = requests.get(content.strip())
+                if res.status_code == 200:
+                    raw_content = res.text
+                else:
+                    raw_content = content # 링크 내용을 못 가져오면 그냥 링크 주소 자체를 재고로 등록
+            except:
+                raw_content = content
+        else:
+            raw_content = content
+
+    if not raw_content:
+        await ctx.send("❌ 재고 내용, 텍스트 파일, 또는 링크 중 하나를 함께 입력해주세요!")
+        return
+
+    stock_list = [line.strip() for line in raw_content.split("\n") if line.strip()]
 
     items_collection.update_one(
         {"name": name}, 
         {
             "$set": {
                 "price": price, 
-                "content": content,
+                "content": raw_content,
                 "stock": stock_list
             }
         }, 
         upsert=True
     )
     await ctx.send(f"✅ 상품 **[{name}]** (가격: {price}원, 등록된 재고 수: {len(stock_list)}개) 등록 완료!")
-
-# --- [텍스트 파일로 상품 재고 추가 명령어] ---
-@bot.command(name="상품파일추가")
-async def add_item_by_file(ctx, name: str, price: int):
-    if not ctx.author.guild_permissions.administrator:
-        return
-
-    if not ctx.message.attachments:
-        await ctx.send("❌ 등록할 `.txt` 파일을 첨부하고 명령어를 입력해주세요!")
-        return
-
-    attachment = ctx.message.attachments[0]
-    if not attachment.filename.endswith(".txt"):
-        await ctx.send("❌ `.txt` 형식의 텍스트 파일만 업로드 가능합니다.")
-        return
-
-    try:
-        file_bytes = await attachment.read()
-        content = file_bytes.decode("utf-8")
-    except Exception as e:
-        await ctx.send(f"❌ 파일을 읽는 중 오류가 발생했습니다: {e}")
-        return
-
-    stock_list = [line.strip() for line in content.split("\n") if line.strip()]
-
-    items_collection.update_one(
-        {"name": name}, 
-        {
-            "$set": {
-                "price": price, 
-                "content": content,
-                "stock": stock_list
-            }
-        }, 
-        upsert=True
-    )
-    await ctx.send(f"파일 업로드 완료! ✅ 상품 **[{name}]** (가격: {price}원, 파일에서 불러온 재고 수: {len(stock_list)}개) 등록 완료!")
 
 @bot.command(name="상품삭제")
 async def delete_item(ctx, *, name: str):
