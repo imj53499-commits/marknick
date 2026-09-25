@@ -37,9 +37,11 @@ MONGO_URI = os.getenv("MONGO_URI")
 mongo_client = MongoClient(MONGO_URI)
 db = mongo_client["discord_bot_db"]
 tokens_collection = db["tokens"]
-users_collection = db["users"]       # 유저 포인트 정보 저장
-items_collection = db["items"]       # 자판기 상품 정보 저장
-orders_collection = db["orders"]     # 주문 내역 저장
+users_collection = db["users"]             # 유저 포인트 정보 저장
+items_collection = db["items"]             # 자판기 상품 정보 저장
+orders_collection = db["orders"]           # 주문 내역 저장
+coupons_collection = db["coupons"]         # 쿠폰 정보 저장
+coupon_logs_collection = db["coupon_logs"] # 쿠폰 사용 기록 저장
 
 def load_tokens():
     tokens = {}
@@ -181,7 +183,6 @@ class ConfirmPurchaseView(View):
             await interaction.response.edit_message(content=f"❌ 포인트가 부족합니다! (필요: {price}원, 보유: {my_points}원)", view=None, embed=None)
             return
 
-        # 포인트 차감 및 주문 기록
         users_collection.update_one({"user_id": str(interaction.user.id)}, {"$inc": {"points": -price}})
         orders_collection.insert_one({
             "user_id": str(interaction.user.id),
@@ -189,7 +190,6 @@ class ConfirmPurchaseView(View):
             "date": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         })
 
-        # 재고 처리
         if is_infinite:
             given_content = item.get("content", "정보 없음")
         else:
@@ -199,7 +199,6 @@ class ConfirmPurchaseView(View):
             else:
                 items_collection.delete_one({"name": self.item_name})
 
-        # 구매자 역할 부여
         if BUYER_ROLE_ID:
             try:
                 buyer_role = interaction.guild.get_role(int(BUYER_ROLE_ID))
@@ -208,7 +207,6 @@ class ConfirmPurchaseView(View):
             except Exception as e:
                 print(f"구매자 역할 부여 오류: {e}")
 
-        # DM 발송 및 응답 처리
         try:
             await interaction.user.send(f"📦 **[{self.item_name}]** 구매가 완료되었습니다!\n\n[상품 정보 / 계정 내용]\n{given_content}")
             await interaction.response.edit_message(content=f"🎉 구매가 정상 완료되었습니다! **DM(개인 메시지)**으로 상품 정보가 발송되었습니다.", view=None, embed=None)
@@ -485,6 +483,92 @@ async def give_point(interaction: discord.Interaction, member: discord.Member, a
     
     users_collection.update_one({"user_id": str(member.id)}, {"$inc": {"points": amount}}, upsert=True)
     await interaction.response.send_message(f"💰 {member.mention}님에게 포인트 {amount}원이 지급되었습니다.", ephemeral=True)
+
+# --- [쿠폰 관리 및 사용 명령어] ---
+@bot.tree.command(name="쿠폰등록", description="새로운 쿠폰을 등록합니다.")
+async def register_coupon(
+    interaction: discord.Interaction, 
+    쿠폰번호: str, 
+    할인금액: int, 
+    사용횟수제한: int, 
+    대상: str, # "모든사람" 또는 "특정사람"
+    특정유저: discord.Member = None
+):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ 관리자만 사용할 수 있는 명령어입니다.", ephemeral=True)
+        return
+    
+    if 대상 not in ["모든사람", "특정사람"]:
+        await interaction.response.send_message("❌ 대상은 '모든사람' 또는 '특정사람' 중 하나로 입력해주세요.", ephemeral=True)
+        return
+
+    if 대상 == "특정사람" and not 특정유저:
+        await interaction.response.send_message("❌ '특정사람'을 대상으로 할 경우 유저를 지정해야 합니다.", ephemeral=True)
+        return
+
+    coupon_data = {
+        "code": 쿠폰번호,
+        "discount": 할인금액,
+        "max_uses": 사용횟수제한,
+        "target_type": 대상,
+        "target_user_id": str(특정유저.id) if 특정유저 else None
+    }
+
+    coupons_collection.update_one({"code": 쿠폰번호}, {"$set": coupon_data}, upsert=True)
+    target_text = "모든 사용자" if 대상 == "모든사람" else f"특정 유저 ({특정유저.mention})"
+    await interaction.response.send_message(f"✅ 쿠폰 **[{쿠폰번호}]** 등록 완료!\n- 충전/할인 금액: {할인금액}원\n- 1인당 사용 횟수: {사용횟수제한}회\n- 대상: {target_text}", ephemeral=True)
+
+@bot.tree.command(name="쿠폰삭제", description="등록된 쿠폰을 삭제합니다.")
+async def delete_coupon(interaction: discord.Interaction, 쿠폰번호: str):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ 관리자만 사용할 수 있는 명령어입니다.", ephemeral=True)
+        return
+    
+    result = coupons_collection.delete_one({"code": 쿠폰번호})
+    if result.deleted_count > 0:
+        await interaction.response.send_message(f"🗑️ 쿠폰 **[{쿠폰번호}]**이(가) 삭제되었습니다.", ephemeral=True)
+    else:
+        await interaction.response.send_message(f"❌ 존재하지 않는 쿠폰 번호입니다.", ephemeral=True)
+
+@bot.tree.command(name="쿠폰사용", description="쿠폰을 입력하여 포인트를 충전/사용합니다.")
+async def use_coupon(interaction: discord.Interaction, 쿠폰번호: str):
+    coupon = coupons_collection.find_one({"code": 쿠폰번호})
+    if not coupon:
+        await interaction.response.send_message("❌ 존재하지 않거나 만료된 쿠폰 번호입니다.", ephemeral=True)
+        return
+
+    user_id = str(interaction.user.id)
+    target_type = coupon.get("target_type")
+    target_user_id = coupon.get("target_user_id")
+
+    # 특정 사람 대상 검증
+    if target_type == "특정사람" and target_user_id and user_id != target_user_id:
+        await interaction.response.send_message("❌ 이 쿠폰을 사용할 수 있는 대상이 아닙니다.", ephemeral=True)
+        return
+
+    max_uses = coupon.get("max_uses", 1)
+    
+    # 유저의 쿠폰 사용 기록 확인
+    log = coupon_logs_collection.find_one({"user_id": user_id, "code": 쿠폰번호})
+    current_uses = log.get("uses", 0) if log else 0
+
+    if max_uses > 0 and current_uses >= max_uses:
+        await interaction.response.send_message(f"❌ 이 쿠폰은 1인당 사용 횟수({max_uses}회)를 모두 소모하셨습니다.", ephemeral=True)
+        return
+
+    discount = coupon.get("discount", 0)
+
+    # 사용 횟수 기록 업데이트
+    coupon_logs_collection.update_one(
+        {"user_id": user_id, "code": 쿠폰번호},
+        {"$inc": {"uses": 1}},
+        upsert=True
+    )
+
+    # 유저 포인트 지급
+    users_collection.update_one({"user_id": user_id}, {"$inc": {"points": discount}}, upsert=True)
+
+    await interaction.response.send_message(f"🎉 쿠폰 사용 완료! **{discount}원**이 포인트로 충전되었습니다.", ephemeral=True)
 
 @bot.tree.command(name="구매후기열기", description="특정 유저에게 구매후기 채널 작성 권한을 1시간 동안 부여합니다.")
 async def open_review(interaction: discord.Interaction, member: discord.Member, channel: discord.TextChannel):
