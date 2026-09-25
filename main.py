@@ -155,7 +155,7 @@ async def on_member_remove(member):
     if channel:
         await channel.send(f"👋 **{member.name}**님이 서버를 나가셨습니다...")
 
-# --- [3단계: 최종 [구매하기] / [취소] 버튼 뷰] ---
+# --- [구매 확인 및 취소 뷰] ---
 class ConfirmPurchaseView(View):
     def __init__(self, item_name):
         super().__init__(timeout=60)
@@ -221,7 +221,7 @@ class ConfirmPurchaseView(View):
     async def cancel_buy(self, interaction: discord.Interaction, button: Button):
         await interaction.response.edit_message(content="❌ 구매가 취소되었습니다.", view=None, embed=None)
 
-# --- [2단계: 상품 선택 셀렉트박스] ---
+# --- [상품 선택 셀렉트박스] ---
 class ItemSelect(Select):
     def __init__(self, items):
         options = []
@@ -273,7 +273,7 @@ class ItemSelectView(View):
         super().__init__(timeout=None)
         self.add_item(ItemSelect(items))
 
-# --- [1단계: 카테고리 선택 셀렉트박스] ---
+# --- [카테고리 선택 셀렉트박스] ---
 class CategorySelect(Select):
     def __init__(self, categories):
         options = [
@@ -414,7 +414,8 @@ async def setup_panels(interaction: discord.Interaction):
     await interaction.channel.send(embed=ticket_embed, view=TicketMainView())
     await interaction.response.send_message("✅ 패널이 성공적으로 생성되었습니다!", ephemeral=True)
 
-@bot.tree.command(name="상품추가", description="일반 재고 상품을 추가합니다.")
+# 💡 상품 추가 (이름과 카테고리가 같으면 재고 누적 기능 탑재!)
+@bot.tree.command(name="상품추가", description="일반 재고 상품을 추가합니다. 이름과 카테고리가 같으면 재고에 누적됩니다.")
 async def add_item(interaction: discord.Interaction, category: str, name: str, price: int, content: str = None):
     if not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message("❌ 관리자만 사용할 수 있는 명령어입니다.", ephemeral=True)
@@ -425,22 +426,40 @@ async def add_item(interaction: discord.Interaction, category: str, name: str, p
         await interaction.response.send_message("❌ 재고 내용이나 텍스트를 함께 입력해주세요!", ephemeral=True)
         return
 
-    stock_list = [line.strip() for line in raw_content.split("\n") if line.strip()]
+    new_stock_list = [line.strip() for line in raw_content.split("\n") if line.strip()]
+    existing_item = items_collection.find_one({"name": name, "category": category})
 
-    items_collection.update_one(
-        {"name": name}, 
-        {
-            "$set": {
-                "category": category,
-                "price": price, 
-                "content": raw_content,
-                "stock": stock_list,
-                "is_infinite": False
+    if existing_item:
+        current_stock = existing_item.get("stock", [])
+        updated_stock = current_stock + new_stock_list
+        
+        items_collection.update_one(
+            {"name": name, "category": category},
+            {
+                "$set": {
+                    "price": price, 
+                    "stock": updated_stock,
+                    "is_infinite": False
+                }
             }
-        }, 
-        upsert=True
-    )
-    await interaction.response.send_message(f"✅ 일반 상품 **[{name}]** (카테고리: {category}, 가격: {price}원, 재고 수: {len(stock_list)}개) 등록 완료!", ephemeral=True)
+        )
+        await interaction.response.send_message(f"✅ 기존 상품 **[{name}]**에 재고 **{len(new_stock_list)}개**가 추가되었습니다! (총 재고: {len(updated_stock)}개)", ephemeral=True)
+    else:
+        items_collection.update_one(
+            {"name": name, "category": category}, 
+            {
+                "$set": {
+                    "category": category,
+                    "name": name,
+                    "price": price, 
+                    "content": raw_content,
+                    "stock": new_stock_list,
+                    "is_infinite": False
+                }
+            }, 
+            upsert=True
+        )
+        await interaction.response.send_message(f"✅ 신규 상품 **[{name}]** (카테고리: {category}, 가격: {price}원, 재고 수: {len(new_stock_list)}개) 등록 완료!", ephemeral=True)
 
 @bot.tree.command(name="무한상품추가", description="재고가 무한인 상품을 추가합니다.")
 async def add_infinite_item(interaction: discord.Interaction, category: str, name: str, price: int, content: str):
@@ -449,10 +468,11 @@ async def add_infinite_item(interaction: discord.Interaction, category: str, nam
         return
 
     items_collection.update_one(
-        {"name": name}, 
+        {"name": name, "category": category}, 
         {
             "$set": {
                 "category": category,
+                "name": name,
                 "price": price, 
                 "content": content,
                 "stock": [],
@@ -484,14 +504,14 @@ async def give_point(interaction: discord.Interaction, member: discord.Member, a
     users_collection.update_one({"user_id": str(member.id)}, {"$inc": {"points": amount}}, upsert=True)
     await interaction.response.send_message(f"💰 {member.mention}님에게 포인트 {amount}원이 지급되었습니다.", ephemeral=True)
 
-# --- [쿠폰 관리 및 사용 명령어] ---
+# --- [쿠폰 명령어들] ---
 @bot.tree.command(name="쿠폰등록", description="새로운 쿠폰을 등록합니다.")
 async def register_coupon(
     interaction: discord.Interaction, 
     쿠폰번호: str, 
     할인금액: int, 
     사용횟수제한: int, 
-    대상: str, # "모든사람" 또는 "특정사람"
+    대상: str, 
     특정유저: discord.Member = None
 ):
     if not interaction.user.guild_permissions.administrator:
@@ -541,14 +561,11 @@ async def use_coupon(interaction: discord.Interaction, 쿠폰번호: str):
     target_type = coupon.get("target_type")
     target_user_id = coupon.get("target_user_id")
 
-    # 특정 사람 대상 검증
     if target_type == "특정사람" and target_user_id and user_id != target_user_id:
         await interaction.response.send_message("❌ 이 쿠폰을 사용할 수 있는 대상이 아닙니다.", ephemeral=True)
         return
 
     max_uses = coupon.get("max_uses", 1)
-    
-    # 유저의 쿠폰 사용 기록 확인
     log = coupon_logs_collection.find_one({"user_id": user_id, "code": 쿠폰번호})
     current_uses = log.get("uses", 0) if log else 0
 
@@ -558,16 +575,13 @@ async def use_coupon(interaction: discord.Interaction, 쿠폰번호: str):
 
     discount = coupon.get("discount", 0)
 
-    # 사용 횟수 기록 업데이트
     coupon_logs_collection.update_one(
         {"user_id": user_id, "code": 쿠폰번호},
         {"$inc": {"uses": 1}},
         upsert=True
     )
 
-    # 유저 포인트 지급
     users_collection.update_one({"user_id": user_id}, {"$inc": {"points": discount}}, upsert=True)
-
     await interaction.response.send_message(f"🎉 쿠폰 사용 완료! **{discount}원**이 포인트로 충전되었습니다.", ephemeral=True)
 
 @bot.tree.command(name="구매후기열기", description="특정 유저에게 구매후기 채널 작성 권한을 1시간 동안 부여합니다.")
